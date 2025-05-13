@@ -1,0 +1,79 @@
+pipeline {
+    agent any
+    tools{
+        maven 'maven'
+    }
+    environment{
+        SONAR_HOST_URL = 'http://http://15.206.158.83:9000//'
+        SONAR_LOGIN = credentials('sonar-token')
+        ECR_REGISTRY = "448049823362.dkr.ecr.ap-south-1.amazonaws.com/myrepo"
+        dockerImageTag = "${env.BUILD_NUMBER}"
+    }
+    stages {
+        stage('git_stage') {
+            steps {
+                checkout scmGit(branches: [[name: '*/main']], extensions: [], userRemoteConfigs: [[url: 'https://github.com/SirishaReddy1234/java_application.git']])
+            }
+        }
+        stage('mvn_build') {
+            steps {
+                sh 'mvn clean package'
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar') {
+                    sh "mvn sonar:sonar -Dsonar.host.url=${SONAR_HOST_URL} -Dsonar.login=${SONAR_LOGIN}"
+                }
+            }
+        }
+        stage('docker_build') {
+            steps {
+                sh 'docker build -t ${ECR_REGISTRY}:${dockerImageTag} .'
+            }
+        }
+        stage('push ecr') {
+            steps {
+                sh 'aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 448049823362.dkr.ecr.ap-south-1.amazonaws.com'
+                sh 'docker push ${ECR_REGISTRY}:${dockerImageTag}'
+            }
+        }
+        
+        stage('Update deployment.yaml') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'Git-token', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                    sh '''
+                      git clone https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/SirishaReddy1234/java_application.git
+                      cd java_application
+                      git pull
+                      sed -i "s|image: ${ECR_REGISTRY}:.*|image: ${ECR_REGISTRY}:${dockerImageTag}|g" deploy.yaml
+                      git config user.email "sirisha@gmail.com"
+                      git config user.name "siri"
+                      git add deploy.yaml
+                      git commit -m "Update image in deployment.yaml"
+                      git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/SirishaReddy1234/java_application.git HEAD:main
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy updated manifest to K8s Cluster') {
+            steps {
+                script {
+                    kubeconfig(credentialsId: 'k8s-token', serverUrl: 'https://172.31.36.187:6443') {
+                        sh '''
+                          kubectl apply -f deploy.yaml
+                          kubectl apply -f service.yaml
+                        '''
+                    }
+                }
+            }
+        }
+
+    }
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
